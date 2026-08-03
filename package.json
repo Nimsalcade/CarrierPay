@@ -1,0 +1,34 @@
+{
+  "name": "carrierpay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CarrierPay — role-based transportation operations, payroll calculation, approval, and paystub application",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev -w @carrierpay/api\" \"npm run dev -w @carrierpay/web\"",
+    "build": "npm run build -w @carrierpay/shared && npm run build -w @carrierpay/api && npm run build -w @carrierpay/web",
+    "start": "npm run start -w @carrierpay/api",
+    "test": "npm run test -w @carrierpay/api",
+    "test:e2e": "npm run test:e2e -w @carrierpay/api",
+    "db:generate": "npm run db:generate -w @carrierpay/prisma",
+    "db:migrate": "npm run db:migrate -w @carrierpay/prisma",
+    "db:push": "npm run db:push -w @carrierpay/prisma",
+    "db:seed": "npm run db:seed -w @carrierpay/prisma",
+    "setup": "tsx scripts/setup-local.ts",
+    "backup": "tsx scripts/backup.ts",
+    "restore": "tsx scripts/restore.ts",
+    "verify-install": "tsx scripts/verify-install.ts",
+    "typecheck": "npm run typecheck -w @carrierpay/shared && npm run typecheck -w @carrierpay/api && npm run typecheck -w @carrierpay/web"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
+}

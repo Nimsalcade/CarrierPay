@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Runtime storage (SQLite DB, paystubs, logos, uploads, backups, Playwright browsers).
+# Directories are created on demand by the app and scripts.
+storage/
+
+# Test artifacts
+coverage/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*

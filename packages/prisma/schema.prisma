@@ -1,0 +1,496 @@
+// CarrierPay data model — PRD §10.
+// All timestamps are UTC. Money is integer cents; percentages are basis points;
+// mileage is hundredths of a mile. SQLite with foreign keys + WAL.
+//
+// SQLite does not support native enums, so all "enum" domains are stored as
+// TEXT (String) with their allowed values enforced by the shared Zod schemas
+// and the application layer. See packages/shared/src/constants/enums.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Company and identity
+// ---------------------------------------------------------------------------
+
+model CompanySettings {
+  id                     String    @id @default(cuid())
+  companyName            String
+  legalName              String
+  addressLine1           String?
+  addressLine2           String?
+  city                   String?
+  state                  String?
+  zip                    String?
+  phone                  String?
+  email                  String?
+  logoPath               String?
+  timezone               String    @default("America/Chicago")
+  weekStartDay           Int       @default(6) // 0=Sunday ... 6=Saturday
+  payrollTriggerCron     String    @default("0 0 * * 6")
+  goLiveDate             DateTime?
+  settlementPrefix       String    @default("ST-")
+  settlementPadding      Int       @default(5)
+  batchPrefix            String    @default("SB-")
+  batchPadding           Int       @default(3)
+  separateReimbursements Boolean   @default(false)
+  createZeroPayEntries   Boolean   @default(false)
+  prorateAssistantPay    Boolean   @default(false)
+  currency               String    @default("USD")
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+}
+
+model User {
+  id                 String          @id @default(cuid())
+  role               String // UserRole
+  firstName          String
+  lastName           String
+  email              String?         @unique
+  username           String?         @unique
+  employeeCode       String          @unique
+  passwordHash       String
+  status             String          @default("ACTIVE") // UserStatus
+  driverType         String?
+  phone              String?
+  address            String?
+  hireDate           DateTime?
+  terminationDate    DateTime?
+  mustChangePassword Boolean         @default(true)
+  createdBy          String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  payRuleSets          PayRuleSet[]
+  recurringItems       RecurringItem[]
+  manualPayItems       ManualPayItem[]
+  payrollEntries       PayrollEntry[]
+  notifications        Notification[]
+  authSessions         AuthSession[]
+  assignments          EquipmentAssignment[] @relation("assignedDriver")
+  loadsDriven          Load[]                @relation("loadDriver")
+  loadsBooked          Load[]                @relation("loadBooker")
+  audits               AuditLog[]
+  loadStatusHistory    LoadStatusHistory[]
+  approvals            PayrollApproval[]
+  paymentRecords       PaymentRecord[]
+  paystubsGenerated    Paystub[]             @relation("paystubGenerator")
+
+  @@index([role, status])
+  @@index([lastName, firstName])
+}
+
+model AuthSession {
+  id               String   @id @default(cuid())
+  userId           String
+  tokenHash        String   @unique
+  csrfTokenHash    String?
+  createdAt        DateTime @default(now())
+  expiresAt        DateTime
+  lastSeenAt       DateTime?
+  ipSummary        String?
+  userAgentSummary String?
+  revokedAt        DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Equipment
+// ---------------------------------------------------------------------------
+
+model Equipment {
+  id            String          @id @default(cuid())
+  type          String // EquipmentType
+  unitNumber    String
+  vin           String?
+  year          Int?
+  make          String?
+  model         String?
+  plate         String?
+  plateState    String?
+  odometerMiles Int?
+  status        String          @default("AVAILABLE") // EquipmentStatus
+  notes         String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  assignments  EquipmentAssignment[]
+  loadsTruck   Load[]                @relation("loadTruck")
+  loadsTrailer Load[]                @relation("loadTrailer")
+
+  @@index([status, type])
+}
+
+model EquipmentAssignment {
+  id              String    @id @default(cuid())
+  equipmentId     String
+  driverUserId    String
+  assignedAt      DateTime
+  returnedAt      DateTime?
+  assignedBy      String?
+  notes           String?
+  overrideReason  String?
+  createdAt       DateTime  @default(now())
+
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+  driver    User      @relation("assignedDriver", fields: [driverUserId], references: [id], onDelete: Restrict)
+
+  @@index([driverUserId, returnedAt])
+  @@index([equipmentId, returnedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Loads
+// ---------------------------------------------------------------------------
+
+model Load {
+  id                     String    @id @default(cuid())
+  loadNumber             String    @unique
+  bookedByUserId         String
+  driverUserId           String?
+  truckId                String?
+  trailerId              String?
+  customerName           String
+  confirmationNumber     String?
+  originFacility         String
+  originCity             String?
+  originState            String?
+  originZip              String?
+  pickupAt               DateTime?
+  destinationFacility    String
+  destinationCity        String?
+  destinationState       String?
+  destinationZip         String?
+  deliveryAt             DateTime?
+  grossRateCents         Int
+  accessorialGrossCents  Int?
+  loadedMilesHundredths  Int
+  emptyMilesHundredths   Int       @default(0)
+  status                 String    @default("DRAFT") // LoadStatus
+  internalNotes          String?
+  driverInstructions     String?
+  payrollLockedAt        DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  bookedBy       User?   @relation("loadBooker", fields: [bookedByUserId], references: [id], onDelete: Restrict)
+  driver         User?   @relation("loadDriver", fields: [driverUserId], references: [id], onDelete: Restrict)
+  truck          Equipment? @relation("loadTruck", fields: [truckId], references: [id], onDelete: Restrict)
+  trailer        Equipment? @relation("loadTrailer", fields: [trailerId], references: [id], onDelete: Restrict)
+  statusHistory  LoadStatusHistory[]
+
+  @@index([status, deliveryAt])
+  @@index([driverUserId, deliveryAt])
+  @@index([bookedByUserId, deliveryAt])
+}
+
+model LoadStatusHistory {
+  id         String    @id @default(cuid())
+  loadId     String
+  fromStatus String? // LoadStatus
+  toStatus   String // LoadStatus
+  actorId    String?
+  note       String?
+  createdAt  DateTime  @default(now())
+
+  load  Load  @relation(fields: [loadId], references: [id], onDelete: Cascade)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([loadId])
+}
+
+// ---------------------------------------------------------------------------
+// Pay rules and recurring items
+// ---------------------------------------------------------------------------
+
+model PayRuleSet {
+  id            String   @id @default(cuid())
+  userId        String
+  role          String // UserRole
+  name          String
+  version       Int
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  status        String   @default("ACTIVE") // RuleSetStatus
+  notes         String?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user       User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  components PayRuleComponent[]
+  lineItems  PayrollLineItem[]
+
+  @@unique([userId, version])
+  @@index([userId, effectiveFrom, effectiveTo])
+}
+
+model PayRuleComponent {
+  id                  String            @id @default(cuid())
+  ruleSetId           String
+  componentType       String // RuleComponentType
+  calculationMethod   String // CalculationMethod
+  displayLabel        String?
+  amountCents         Int?
+  rateBasisPoints     Int?
+  centsPerMile        Int?
+  thresholdCents      Int?
+  sequence            Int               @default(0)
+
+  ruleSet PayRuleSet @relation(fields: [ruleSetId], references: [id], onDelete: Cascade)
+  lineItems PayrollLineItem[]
+
+  @@index([ruleSetId])
+}
+
+model RecurringItem {
+  id                  String   @id @default(cuid())
+  userId              String
+  itemType            String // RecurringItemType
+  name                String
+  description         String?
+  amountCents         Int
+  recurrence          String // RecurringSchedule
+  intervalCount       Int      @default(1)
+  dayOfMonth          Int?
+  startDate           DateTime
+  endDate             DateTime?
+  maxOccurrences      Int?
+  applyWhenNoEarnings Boolean  @default(false)
+  quantity            Int?
+  active              Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user         User                      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  occurrences  RecurringItemOccurrence[]
+
+  @@index([userId, active, startDate])
+}
+
+model ManualPayItem {
+  id          String   @id @default(cuid())
+  userId      String
+  payPeriodId String
+  itemType    String // RecurringItemType
+  amountCents Int
+  description String
+  quantity    Int?
+  status      String   @default("APPROVED_FOR_CALCULATION") // ManualItemStatus
+  createdBy   String?
+  createdAt   DateTime @default(now())
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  payPeriod PayPeriod  @relation(fields: [payPeriodId], references: [id], onDelete: Cascade)
+
+  @@index([payPeriodId])
+}
+
+// ---------------------------------------------------------------------------
+// Payroll
+// ---------------------------------------------------------------------------
+
+model PayPeriod {
+  id                   String   @id @default(cuid())
+  startAt              DateTime
+  endAt                DateTime
+  timezone             String
+  schedulerKey         String?  @unique
+  status               String   @default("DRAFT") // PayPeriodStatus
+  calculationStartedAt DateTime?
+  calculatedAt         DateTime?
+  approvedAt           DateTime?
+  publishedAt          DateTime?
+  calculatorVersion    String?
+  totalsHash           String?
+  error                String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  entries           PayrollEntry[]
+  manualItems       ManualPayItem[]
+  approvals         PayrollApproval[]
+  occurrences       RecurringItemOccurrence[]
+
+  @@index([status, endAt])
+}
+
+model PayrollEntry {
+  id                  String   @id @default(cuid())
+  payPeriodId         String
+  userId              String
+  role                String // UserRole
+  grossRevenueCents   Int      @default(0)
+  earningsCents       Int      @default(0)
+  otherPayCents       Int      @default(0)
+  reimbursementsCents Int      @default(0)
+  advancesCents       Int      @default(0)
+  deductionsCents     Int      @default(0)
+  netPayCents         Int      @default(0)
+  status              String   @default("CALCULATED") // PayrollEntryStatus
+  validationJson      String   @default("[]")
+  calculationHash     String?
+  createdBy           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  payPeriod PayPeriod          @relation(fields: [payPeriodId], references: [id], onDelete: Cascade)
+  user      User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  lineItems PayrollLineItem[]
+  paystubs  Paystub[]
+
+  @@unique([payPeriodId, userId])
+  @@index([payPeriodId, role])
+}
+
+model PayrollLineItem {
+  id                  String   @id @default(cuid())
+  payrollEntryId      String
+  category            String // PayrollCategory
+  sourceType          String
+  sourceId            String?
+  description         String
+  amountCents         Int
+  ruleSetId           String?
+  ruleComponentId     String?
+  calculationJson     String?
+  originalAmountCents Int?
+  overrideReason      String?
+  createdBy           String?
+  createdAt           DateTime @default(now())
+
+  payrollEntry  PayrollEntry    @relation(fields: [payrollEntryId], references: [id], onDelete: Cascade)
+  ruleSet       PayRuleSet?     @relation(fields: [ruleSetId], references: [id], onDelete: SetNull)
+  ruleComponent PayRuleComponent? @relation(fields: [ruleComponentId], references: [id], onDelete: SetNull)
+
+  @@unique([payrollEntryId, sourceType, sourceId, category])
+  @@index([payrollEntryId, category])
+}
+
+model RecurringItemOccurrence {
+  id                String   @id @default(cuid())
+  recurringItemId   String
+  payPeriodId       String
+  payrollLineItemId String?
+  createdAt         DateTime @default(now())
+
+  recurringItem   RecurringItem @relation(fields: [recurringItemId], references: [id], onDelete: Restrict)
+  payPeriod       PayPeriod     @relation(fields: [payPeriodId], references: [id], onDelete: Cascade)
+
+  @@unique([recurringItemId, payPeriodId])
+  @@index([payPeriodId])
+}
+
+model PayrollApproval {
+  id          String   @id @default(cuid())
+  payPeriodId String
+  entryId     String?
+  actorId     String
+  action      String // PayrollApprovalAction
+  totalsHash  String?
+  comment     String?
+  createdAt   DateTime @default(now())
+
+  payPeriod PayPeriod @relation(fields: [payPeriodId], references: [id], onDelete: Cascade)
+  actor     User      @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([payPeriodId])
+}
+
+// ---------------------------------------------------------------------------
+// Paystubs and payments
+// ---------------------------------------------------------------------------
+
+model Paystub {
+  id                  String   @id @default(cuid())
+  payrollEntryId      String
+  settlementNumber    String   @unique
+  version             Int
+  pdfPath             String
+  checksumSha256      String
+  generatedAt         DateTime?
+  publishedAt         DateTime?
+  generatorId         String?
+  supersedesPaystubId String?
+  createdAt           DateTime @default(now())
+
+  payrollEntry PayrollEntry @relation(fields: [payrollEntryId], references: [id], onDelete: Restrict)
+  generator    User?        @relation("paystubGenerator", fields: [generatorId], references: [id], onDelete: SetNull)
+  supersedes   Paystub?     @relation("supersedes", fields: [supersedesPaystubId], references: [id], onDelete: SetNull)
+  supersededBy Paystub[]    @relation("supersedes")
+  payments     PaymentRecord[]
+
+  @@unique([payrollEntryId, version])
+  @@index([payrollEntryId, version])
+}
+
+model PaymentRecord {
+  id                String   @id @default(cuid())
+  paystubId         String
+  paidDate          DateTime
+  method            String?
+  externalReference String?
+  note              String?
+  actorId           String?
+  createdAt         DateTime @default(now())
+
+  paystub Paystub @relation(fields: [paystubId], references: [id], onDelete: Restrict)
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@unique([paystubId, externalReference])
+  @@index([paystubId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications, audit, sequences
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id                String   @id @default(cuid())
+  recipientUserId   String
+  type              String
+  title             String
+  body              String?
+  link              String?
+  readAt            DateTime?
+  createdAt         DateTime @default(now())
+
+  user User @relation(fields: [recipientUserId], references: [id], onDelete: Cascade)
+
+  @@index([recipientUserId, readAt, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entityType String
+  entityId  String?
+  beforeJson String?
+  afterJson String?
+  reason    String?
+  requestId String?
+  ipSummary String?
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([createdAt])
+}
+
+model NumberSequence {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  currentValue Int      @default(0)
+  updatedAt    DateTime @updatedAt
+}
