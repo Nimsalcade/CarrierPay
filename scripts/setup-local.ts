@@ -83,9 +83,9 @@ function main(): void {
 
   step('Done');
   console.log('\nCarrierPay is ready. Start it with:');
-  console.log('   npm run dev            # API :3001 + Web :5173 (development)');
-  console.log('   npm run build && npm start   # production (single process :3001)');
-  console.log('\nOpen http://localhost:5173 in development, or http://localhost:3001 in production.');
+  console.log('   npm run dev            # API :4000 + Web :5173 (development)');
+  console.log('   npm run build && npm start   # production (single process :4000)');
+  console.log('\nOpen http://localhost:5173 in development, or http://localhost:4000 in production.');
   console.log('\nDemo logins (seeded):');
   console.log('   super      → admin      / AdminPass123!');
   console.log('   assistant  → assistant  / Assistant123!');

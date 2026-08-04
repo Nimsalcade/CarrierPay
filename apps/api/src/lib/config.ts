@@ -16,9 +16,9 @@ function bool(v: string | undefined, def: boolean): boolean {
 
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
-  port: Number(process.env.PORT ?? 3001),
+  port: Number(process.env.PORT ?? 4000),
   host: process.env.HOST ?? '127.0.0.1',
-  appBaseUrl: process.env.APP_BASE_URL ?? 'http://localhost:3001',
+  appBaseUrl: process.env.APP_BASE_URL ?? 'http://localhost:4000',
   sessionCookieName: process.env.SESSION_COOKIE_NAME ?? 'carrierpay_session',
   sessionTtlHours: Number(process.env.SESSION_TTL_HOURS ?? 12),
   logLevel: process.env.LOG_LEVEL ?? 'info',

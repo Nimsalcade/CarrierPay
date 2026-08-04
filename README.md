@@ -66,14 +66,14 @@ storage/        SQLite database, paystubs, logos, backups, Playwright browsers
 # 1. Install + migrate + seed + install Playwright Chromium (one command)
 npm run setup
 
-# 2a. Development (API :3001 + web :5173, hot reload)
+# 2a. Development (API :4000 + web :5173, hot reload)
 npm run dev
 #     Open http://localhost:5173
 
-# 2b. Production (single process, API serves the built SPA on :3001)
+# 2b. Production (single process, API serves the built SPA on :4000)
 npm run build
 npm start
-#     Open http://localhost:3001
+#     Open http://localhost:4000
 ```
 
 ### Demo logins (seeded)
@@ -95,7 +95,7 @@ The seed creates a payroll period in **PENDING_APPROVAL** state with the golden-
 npm run setup            # full local setup (install, migrate, seed, browsers)
 npm run dev              # dev servers (api + web)
 npm run build            # production build (shared → api → web)
-npm start                # run production server (:3001)
+npm start                # run production server (:4000)
 npm run typecheck        # typecheck every workspace
 npm test                 # unit tests (api)
 npm run test:e2e         # integration + golden-fixture tests (api)
