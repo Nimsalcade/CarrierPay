@@ -78,6 +78,7 @@ model User {
   loadsBooked          Load[]                @relation("loadBooker")
   audits               AuditLog[]
   loadStatusHistory    LoadStatusHistory[]
+  loadAttachments      LoadAttachment[]
   approvals            PayrollApproval[]
   paymentRecords       PaymentRecord[]
   paystubsGenerated    Paystub[]             @relation("paystubGenerator")
@@ -187,6 +188,7 @@ model Load {
   truck          Equipment? @relation("loadTruck", fields: [truckId], references: [id], onDelete: Restrict)
   trailer        Equipment? @relation("loadTrailer", fields: [trailerId], references: [id], onDelete: Restrict)
   statusHistory  LoadStatusHistory[]
+  attachments    LoadAttachment[]
 
   @@index([status, deliveryAt])
   @@index([driverUserId, deliveryAt])
@@ -204,6 +206,26 @@ model LoadStatusHistory {
 
   load  Load  @relation(fields: [loadId], references: [id], onDelete: Cascade)
   actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([loadId])
+}
+
+// Load document attachments (proof-of-delivery / rate confirmation, PRD §6.4).
+// Files are stored on disk under storage/documents/loads/<loadId>/<uuid><ext>;
+// only metadata (original name, MIME, size) is kept in the database (§14.2).
+model LoadAttachment {
+  id           String   @id @default(cuid())
+  loadId       String
+  kind         String   // POD | RATE_CONFIRMATION
+  filePath     String
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  uploadedById String?
+  createdAt    DateTime @default(now())
+
+  load       Load @relation(fields: [loadId], references: [id], onDelete: Cascade)
+  uploadedBy User? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
 
   @@index([loadId])
 }

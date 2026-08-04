@@ -1,14 +1,64 @@
 /**
  * Load management (PRD §6.4).
+ *
+ * Document attachments (proof-of-delivery / rate confirmation, §6.4) are
+ * uploaded as multipart under /loads/:id/attachments. Files are written to
+ * storage/documents/loads/<loadId>/<uuid><ext>; the database holds only
+ * metadata (original name, MIME, size) per §14.2.
  */
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { Router } from 'express';
+import type { RequestHandler } from 'express';
+import multer from 'multer';
 import { LoadStatus, UserRole, loadCreateSchema, loadStatusSchema, loadUpdateSchema } from '@carrierpay/shared';
 import { ah, pagination, validate } from '../lib/http.js';
 import { prisma } from '../lib/prisma.js';
 import { AuthedRequest, requireAuth, requireCsrf } from '../auth/session.js';
 import { audit } from '../lib/audit.js';
-import { badRequest, forbidden, notFound } from '../lib/errors.js';
+import { AppError, badRequest, forbidden, notFound } from '../lib/errors.js';
+import { storageDir } from '../lib/config.js';
 import { assertTransition, markStaleForLoad } from '../services/loads.js';
+
+/** Load attachment upload policy (PRD §14.2): whitelisted MIME types + size cap. */
+const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const ATTACHMENT_MIME_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/tiff']);
+const ATTACHMENT_KINDS = new Set(['POD', 'RATE_CONFIRMATION']);
+
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: ATTACHMENT_MAX_BYTES, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    if (!ATTACHMENT_MIME_TYPES.has(file.mimetype)) {
+      return cb(new AppError(400, 'UNSUPPORTED_FILE_TYPE', `Unsupported file type "${file.mimetype}". Allowed: PDF, JPEG, PNG, TIFF.`));
+    }
+    cb(null, true);
+  },
+});
+
+/** Wrap multer so its errors surface as clean API responses, not 500s. */
+function multerSafe(mw: RequestHandler): RequestHandler {
+  return (req, res, next) => {
+    mw(req, res, (err?: unknown) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return next(badRequest('FILE_TOO_LARGE', `File exceeds the ${ATTACHMENT_MAX_BYTES / 1024 / 1024} MB limit.`));
+        }
+        return next(badRequest('UPLOAD_ERROR', `Upload failed: ${err.message}`));
+      }
+      next(err as Error);
+    });
+  };
+}
+
+const attachmentUploadMiddleware = multerSafe(attachmentUpload.single('file'));
+
+function sanitizeFilename(name: string): string {
+  const cleaned = name.replace(/[^\w.\- ]/g, '').slice(0, 120);
+  return cleaned || 'attachment';
+}
 
 export const loadRoutes = Router();
 loadRoutes.use(requireAuth, requireCsrf);
@@ -222,6 +272,132 @@ loadRoutes.post(
       reason,
     });
     res.json(updated);
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Load document attachments (POD / rate confirmation) — PRD §6.4
+// ---------------------------------------------------------------------------
+
+/** Strip internal fields before returning an attachment to the client. */
+function publicAttachment(a: {
+  id: string;
+  kind: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: Date;
+  uploadedBy?: { id: string; firstName: string; lastName: string; employeeCode: string } | null;
+}) {
+  return {
+    id: a.id,
+    kind: a.kind,
+    originalName: a.originalName,
+    mimeType: a.mimeType,
+    sizeBytes: a.sizeBytes,
+    createdAt: a.createdAt,
+    uploadedBy: a.uploadedBy
+      ? { id: a.uploadedBy.id, firstName: a.uploadedBy.firstName, lastName: a.uploadedBy.lastName, employeeCode: a.uploadedBy.employeeCode }
+      : null,
+  };
+}
+
+loadRoutes.post(
+  '/loads/:id/attachments',
+  attachmentUploadMiddleware,
+  ah(async (req: AuthedRequest, res) => {
+    const load = await prisma.load.findUnique({ where: { id: req.params.id } });
+    if (!load) throw notFound('LOAD_NOT_FOUND');
+    authorizeLoadView(load, req.user!.role as UserRole, req.user!.id);
+
+    const file = req.file;
+    if (!file) throw badRequest('FILE_REQUIRED', 'Attach a file to upload.');
+    const kind = String((req.body as { kind?: string }).kind ?? 'POD').toUpperCase();
+    if (!ATTACHMENT_KINDS.has(kind)) throw badRequest('INVALID_KIND', 'kind must be POD or RATE_CONFIRMATION.');
+
+    const originalName = path.basename(file.originalname || 'attachment');
+    const generatedId = crypto.randomUUID();
+    const ext = path.extname(originalName).slice(0, 12).toLowerCase();
+    const dir = path.join(storageDir('documents'), 'loads', load.id);
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, `${generatedId}${ext}`);
+    fs.writeFileSync(filePath, file.buffer);
+
+    const record = await prisma.loadAttachment.create({
+      data: {
+        loadId: load.id,
+        kind,
+        filePath,
+        originalName,
+        mimeType: file.mimetype,
+        sizeBytes: file.size,
+        uploadedById: req.user!.id,
+      },
+    });
+    await audit(req, {
+      action: 'LOAD.ATTACHMENT_UPLOAD',
+      entityType: 'load',
+      entityId: load.id,
+      after: { attachmentId: record.id, kind, originalName, sizeBytes: file.size },
+    });
+    res.status(201).json(publicAttachment(record));
+  }),
+);
+
+loadRoutes.get(
+  '/loads/:id/attachments',
+  ah(async (req: AuthedRequest, res) => {
+    const load = await prisma.load.findUnique({ where: { id: req.params.id } });
+    if (!load) throw notFound('LOAD_NOT_FOUND');
+    authorizeLoadView(load, req.user!.role as UserRole, req.user!.id);
+
+    const items = await prisma.loadAttachment.findMany({
+      where: { loadId: load.id },
+      orderBy: { createdAt: 'desc' },
+      include: { uploadedBy: { select: { id: true, firstName: true, lastName: true, employeeCode: true } } },
+    });
+    res.json(items.map(publicAttachment));
+  }),
+);
+
+loadRoutes.get(
+  '/loads/:id/attachments/:attachmentId/download',
+  ah(async (req: AuthedRequest, res) => {
+    const load = await prisma.load.findUnique({ where: { id: req.params.id } });
+    if (!load) throw notFound('LOAD_NOT_FOUND');
+    authorizeLoadView(load, req.user!.role as UserRole, req.user!.id);
+
+    const att = await prisma.loadAttachment.findFirst({ where: { id: req.params.attachmentId, loadId: load.id } });
+    if (!att) throw notFound('ATTACHMENT_NOT_FOUND');
+    if (!fs.existsSync(att.filePath)) throw notFound('ATTACHMENT_FILE_MISSING', 'The file is missing on disk.');
+
+    res.setHeader('Content-Type', att.mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${sanitizeFilename(att.originalName)}"`);
+    fs.createReadStream(att.filePath).pipe(res);
+  }),
+);
+
+loadRoutes.delete(
+  '/loads/:id/attachments/:attachmentId',
+  ah(async (req: AuthedRequest, res) => {
+    const load = await prisma.load.findUnique({ where: { id: req.params.id } });
+    if (!load) throw notFound('LOAD_NOT_FOUND');
+
+    const att = await prisma.loadAttachment.findFirst({ where: { id: req.params.attachmentId, loadId: load.id } });
+    if (!att) throw notFound('ATTACHMENT_NOT_FOUND');
+    const role = req.user!.role as UserRole;
+    const isManager = role === UserRole.SUPER_ACCOUNT_MANAGER || role === UserRole.ASSISTANT_ACCOUNT_MANAGER;
+    if (!isManager && att.uploadedById !== req.user!.id) throw forbidden();
+
+    await prisma.loadAttachment.delete({ where: { id: att.id } });
+    fs.rmSync(att.filePath, { force: true });
+    await audit(req, {
+      action: 'LOAD.ATTACHMENT_DELETE',
+      entityType: 'load',
+      entityId: load.id,
+      after: { attachmentId: att.id, originalName: att.originalName },
+    });
+    res.json({ ok: true });
   }),
 );
 

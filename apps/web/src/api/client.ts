@@ -29,6 +29,7 @@ export class ApiError extends Error {
 
 export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+  /** JSON-serializable value, or a FormData instance for multipart uploads. */
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined | null>;
 }
@@ -45,14 +46,15 @@ export async function api<T>(path: string, opts: RequestOptions = {}): Promise<T
     if (qs) url += `?${qs}`;
   }
 
+  const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
   const headers: Record<string, string> = {};
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (body !== undefined && !isFormData) headers['Content-Type'] = 'application/json';
   if (method !== 'GET' && csrfToken) headers['X-CSRF-Token'] = csrfToken;
 
   const res = await fetch(url, {
     method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? (isFormData ? body : JSON.stringify(body)) : undefined,
     credentials: 'include',
   });
 

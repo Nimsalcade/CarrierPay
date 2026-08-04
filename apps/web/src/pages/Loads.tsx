@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { api, ApiError } from '../api/client';
 import { useAsync } from '../lib/useAsync';
@@ -42,6 +42,24 @@ interface LoadPage {
   page: number;
   pageSize: number;
 }
+
+interface AttachmentItem {
+  id: string;
+  kind: 'POD' | 'RATE_CONFIRMATION';
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+  uploadedBy: { id: string; firstName: string; lastName: string; employeeCode: string } | null;
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const ATTACHMENT_ACCEPT = 'application/pdf,image/jpeg,image/png,image/tiff';
 
 export function LoadsPage() {
   const { me } = useAuth();
@@ -366,12 +384,62 @@ function LoadManageModal({ load, onClose, onDone }: { load: LoadItem; onClose: (
   const [ok, setOk] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Document attachments (POD / rate confirmation) — PRD §6.4
+  const [attachments, setAttachments] = useState<AttachmentItem[] | null>(null);
+  const [attachError, setAttachError] = useState<string | null>(null);
+  const [uploadKind, setUploadKind] = useState<'POD' | 'RATE_CONFIRMATION'>('POD');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api<AttachmentItem[]>(`/loads/${load.id}/attachments`)
+      .then((items) => {
+        if (!cancelled) setAttachments(items);
+      })
+      .catch((err) => {
+        if (!cancelled) setAttachError(err instanceof ApiError ? err.message : 'Failed to load attachments.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [load.id]);
+
+  const upload = async () => {
+    if (!uploadFile) return;
+    setUploading(true);
+    setAttachError(null);
+    try {
+      const fd = new FormData();
+      fd.append('kind', uploadKind);
+      fd.append('file', uploadFile);
+      const created = await api<AttachmentItem>(`/loads/${load.id}/attachments`, { method: 'POST', body: fd });
+      setAttachments((prev) => (prev ? [created, ...prev] : [created]));
+      setUploadFile(null);
+    } catch (err) {
+      setAttachError(err instanceof ApiError ? err.message : 'Upload failed.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const removeAttachment = async (a: AttachmentItem) => {
+    setAttachError(null);
+    try {
+      await api(`/loads/${load.id}/attachments/${a.id}`, { method: 'DELETE' });
+      setAttachments((prev) => prev?.filter((x) => x.id !== a.id) ?? null);
+    } catch (err) {
+      setAttachError(err instanceof ApiError ? err.message : 'Delete failed.');
+    }
+  };
+
   if (!me) return null;
   const isSuper = me.role === 'SUPER_ACCOUNT_MANAGER';
   const isDispatcher = me.role === 'DISPATCHER';
   // Dispatchers may transition loads they booked or drive.
   const dispatcherAllowed = isDispatcher && (load.bookedBy?.id === me.id || load.driver?.id === me.id);
   const canStatus = isSuper || dispatcherAllowed;
+  const canAttach = isSuper || me.role === 'ASSISTANT_ACCOUNT_MANAGER' || isDispatcher;
 
   const act = async (fn: () => Promise<unknown>, success: string) => {
     setBusy(true);
@@ -461,6 +529,71 @@ function LoadManageModal({ load, onClose, onDone }: { load: LoadItem; onClose: (
           </div>
         </div>
       ) : null}
+
+      <div className="form-grid" style={{ marginTop: 20 }}>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <h3 style={{ fontSize: 15, margin: '0 0 12px' }}>Documents</h3>
+          {attachError ? <div className="alert alert-error">{attachError}</div> : null}
+          <div className="flex" style={{ gap: 8, marginBottom: 12 }}>
+            <select value={uploadKind} onChange={(e) => setUploadKind(e.target.value as 'POD' | 'RATE_CONFIRMATION')} className="input" style={{ width: 180 }}>
+              <option value="POD">Proof of delivery</option>
+              <option value="RATE_CONFIRMATION">Rate confirmation</option>
+            </select>
+            <input
+              type="file"
+              accept={ATTACHMENT_ACCEPT}
+              onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+              style={{ maxWidth: 260 }}
+            />
+            <button className="btn btn-primary" disabled={uploading || !uploadFile} onClick={() => void upload()}>
+              {uploading ? 'Uploading…' : 'Upload'}
+            </button>
+          </div>
+          {canAttach ? null : <p className="small muted">Only managers and dispatchers can upload documents.</p>}
+          {attachments === null ? (
+            <Spinner />
+          ) : attachments.length === 0 ? (
+            <p className="muted">No documents attached.</p>
+          ) : (
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Kind</th>
+                  <th>File</th>
+                  <th className="num">Size</th>
+                  <th>Uploaded by</th>
+                  <th>Uploaded</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {attachments.map((a) => (
+                  <tr key={a.id}>
+                    <td>
+                      <Badge tone={a.kind === 'POD' ? 'blue' : 'green'}>{a.kind === 'POD' ? 'POD' : 'Rate conf.'}</Badge>
+                    </td>
+                    <td className="small">
+                      <a href={`/api/v1/loads/${load.id}/attachments/${a.id}/download`}>{a.originalName}</a>
+                    </td>
+                    <td className="num muted">{fmtBytes(a.sizeBytes)}</td>
+                    <td className="small muted">
+                      {a.uploadedBy ? `${a.uploadedBy.firstName} ${a.uploadedBy.lastName}` : '—'}
+                    </td>
+                    <td className="small muted">{dt(a.createdAt)}</td>
+                    <td className="num">
+                      {isSuper || a.uploadedBy?.id === me.id ? (
+                        <button className="btn btn-danger btn-sm" onClick={() => void removeAttachment(a)}>
+                          Delete
+                        </button>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
     </Modal>
   );
 }

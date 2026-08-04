@@ -190,3 +190,80 @@ describe('payroll golden fixture (PRD §17)', () => {
     expect(res.body.total).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe('load attachments (PRD §6.4)', () => {
+  let loadId: string;
+
+  beforeAll(async () => {
+    const load = await prisma.load.findFirst({ orderBy: { createdAt: 'desc' } });
+    expect(load).not.toBeNull();
+    loadId = load!.id;
+  });
+
+  const uploadPdf = (filename = 'pod-e2e.pdf') =>
+    request(app)
+      .post(`/api/v1/loads/${loadId}/attachments`)
+      .set(withAuth(admin))
+      .field('kind', 'POD')
+      .attach('file', Buffer.from('%PDF-1.4\n% CarrierPay e2e POD\n'), { filename, contentType: 'application/pdf' });
+
+  it('uploads a POD attachment (multipart)', async () => {
+    const res = await uploadPdf();
+    expect(res.status).toBe(201);
+    expect(res.body.kind).toBe('POD');
+    expect(res.body.originalName).toBe('pod-e2e.pdf');
+    expect(res.body.sizeBytes).toBeGreaterThan(0);
+    expect(res.body.createdAt).toBeDefined();
+    expect(res.body.filePath).toBeUndefined(); // internal disk path must not leak
+  });
+
+  it('lists attachments with uploader info', async () => {
+    const res = await request(app).get(`/api/v1/loads/${loadId}/attachments`).set('Cookie', admin.cookie);
+    expect(res.status).toBe(200);
+    const items = res.body as Array<{ kind: string; originalName: string; uploadedBy: { employeeCode: string } | null }>;
+    expect(items.length).toBeGreaterThanOrEqual(1);
+    expect(items[0]?.kind).toBe('POD');
+    expect(items[0]?.uploadedBy?.employeeCode).toBe('ADMIN');
+  });
+
+  it('downloads the attached file with the original name', async () => {
+    const list = await request(app).get(`/api/v1/loads/${loadId}/attachments`).set('Cookie', admin.cookie);
+    const first = (list.body as Array<{ id: string; originalName: string }>)[0];
+    expect(first).toBeDefined();
+    const res = await request(app).get(`/api/v1/loads/${loadId}/attachments/${first!.id}/download`).set('Cookie', admin.cookie);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('application/pdf');
+    expect((res.body as Buffer).length).toBeGreaterThan(0);
+  });
+
+  it('rejects a file type outside the whitelist', async () => {
+    const res = await request(app)
+      .post(`/api/v1/loads/${loadId}/attachments`)
+      .set(withAuth(admin))
+      .field('kind', 'POD')
+      .attach('file', Buffer.from('this is not a pdf'), { filename: 'note.txt', contentType: 'text/plain' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('UNSUPPORTED_FILE_TYPE');
+  });
+
+  it('rejects an unknown attachment kind', async () => {
+    const res = await request(app)
+      .post(`/api/v1/loads/${loadId}/attachments`)
+      .set(withAuth(admin))
+      .field('kind', 'INVOICE')
+      .attach('file', Buffer.from('%PDF'), { filename: 'x.pdf', contentType: 'application/pdf' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_KIND');
+  });
+
+  it('deletes an attachment and removes it from the list', async () => {
+    const up = await uploadPdf('delete-me.pdf');
+    const id = (up.body as { id: string }).id;
+    const del = await request(app).delete(`/api/v1/loads/${loadId}/attachments/${id}`).set(withAuth(admin));
+    expect(del.status).toBe(200);
+    expect(del.body.ok).toBe(true);
+    const list = await request(app).get(`/api/v1/loads/${loadId}/attachments`).set('Cookie', admin.cookie);
+    const ids = (list.body as Array<{ id: string }>).map((a) => a.id);
+    expect(ids).not.toContain(id);
+  });
+});
